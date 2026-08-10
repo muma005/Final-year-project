@@ -201,28 +201,60 @@ st.set_page_config(page_title="CLINEX - Clinical Information Extraction System",
 
 st.markdown("""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
+    
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-    .brand-title { font-weight: 800; font-size: 1.8rem; color: #1E3A8A; letter-spacing: 1px; margin-bottom: -10px; }
-    .brand-subtitle { font-size: 0.9rem; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 30px; }
-    .status-online { color: #10B981; font-weight: bold; }
-    .status-pending { color: #F59E0B; font-weight: bold; }
-    .status-completed { color: #3B82F6; font-weight: bold; }
-    .metric-card { background-color: #ffffff; border: 1px solid #E5E7EB; border-radius: 6px; padding: 1.5rem; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-    .metric-value { font-size: 2.5rem; font-weight: 700; color: #111827; }
-    .metric-label { font-size: 0.75rem; font-weight: 600; color: #6B7280; text-transform: uppercase; letter-spacing: 1px; }
-    .data-card { background-color: #ffffff; border: 1px solid #E5E7EB; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; transition: box-shadow 0.2s; }
-    .data-card:hover { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); border-color: #D1D5DB; }
-    .result-section { background-color: #ffffff; border: 1px solid #E5E7EB; border-left: 4px solid #1E3A8A; border-radius: 4px; padding: 1.2rem; margin-bottom: 1.2rem; }
-    .result-header { font-size: 0.75rem; font-weight: 700; color: #6B7280; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.5rem; }
-    .result-content { font-size: 1rem; color: #111827; font-weight: 500; }
-    .empty-result { color: #9CA3AF; font-style: italic; font-size: 0.9rem; }
-    .workstation-note { background-color: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 6px; padding: 1.5rem; font-family: monospace; font-size: 0.95rem; line-height: 1.6; color: #374151; white-space: pre-wrap; }
-    .breadcrumbs { font-size: 0.85rem; color: #6B7280; margin-bottom: 1.5rem; }
-    .metadata-block { background-color: #F3F4F6; border-radius: 4px; padding: 1rem; margin-top: 2rem; font-size: 0.85rem; color: #4B5563; }
-    [data-testid="stSidebar"] { background-color: #F9FAFB; border-right: 1px solid #E5E7EB; }
+    
+    /* Global Typography & Background */
+    body, .stApp { 
+        font-family: 'Outfit', sans-serif; 
+        background: linear-gradient(135deg, #020617 0%, #0f172a 100%);
+        color: #f8fafc;
+    }
+    
+    /* Headers */
+    h1, h2, h3, h4, h5, h6, .markdown-text-container { font-family: 'Outfit', sans-serif; }
+    
+    /* Branding */
+    .brand-title { font-weight: 800; font-size: 2rem; background: linear-gradient(to right, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: 1.5px; margin-bottom: -10px; }
+    .brand-subtitle { font-size: 0.9rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 600; margin-bottom: 30px; }
+    
+    /* Status indicators */
+    .status-online { color: #10b981; font-weight: 600; text-shadow: 0 0 10px rgba(16,185,129,0.5); }
+    .status-pending { color: #f59e0b; font-weight: 600; }
+    .status-completed { color: #38bdf8; font-weight: 600; text-shadow: 0 0 10px rgba(56,189,248,0.5); }
+    
+    /* Glassmorphism Cards */
+    .metric-card { background-color: rgba(255,255,255,0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 1.5rem; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.3s ease, border-color 0.3s ease; }
+    .metric-card:hover { transform: translateY(-5px); border-color: rgba(56,189,248,0.4); }
+    .metric-value { font-size: 2.5rem; font-weight: 800; color: #f8fafc; }
+    .metric-label { font-size: 0.8rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; }
+    
+    .data-card { background-color: rgba(255,255,255,0.02); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 1.2rem; margin-bottom: 1rem; transition: all 0.3s ease; }
+    .data-card:hover { border-color: rgba(56,189,248,0.5); background-color: rgba(255,255,255,0.05); transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
+    
+    /* Results Interface */
+    .result-section { background-color: rgba(15,23,42,0.6); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.05); border-left: 4px solid #38bdf8; border-radius: 8px; padding: 1.2rem; margin-bottom: 1.2rem; }
+    .result-header { font-size: 0.75rem; font-weight: 700; color: #cbd5e1; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 0.5rem; }
+    .result-content { font-size: 1rem; color: #f8fafc; font-weight: 400; }
+    .empty-result { color: #64748b; font-style: italic; font-size: 0.9rem; }
+    
+    /* Workstation */
+    .workstation-note { background-color: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 1.5rem; font-family: 'Outfit', sans-serif; font-size: 0.95rem; line-height: 1.6; color: #cbd5e1; white-space: pre-wrap; }
+    
+    /* Breadcrumbs & Metadata */
+    .breadcrumbs { font-size: 0.85rem; color: #94a3b8; margin-bottom: 1.5rem; }
+    .metadata-block { background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 1rem; margin-top: 2rem; font-size: 0.85rem; color: #94a3b8; }
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] { background-color: rgba(15,23,42,0.9); backdrop-filter: blur(20px); border-right: 1px solid rgba(255,255,255,0.05); }
+    
+    /* Tables/Lists styling override */
+    .stMarkdown p { color: #f8fafc !important; }
+    strong { color: #f1f5f9; font-weight: 600; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -396,8 +428,8 @@ def show_workspace():
     st.markdown(f"#### {patient['patient_code']}")
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""
-    <div style="border: 1px solid #E5E7EB; border-radius: 6px; padding: 1.5rem; background-color: #F9FAFB; margin-bottom: 2rem;">
-        <h4 style="margin-top: 0; color: #4B5563; font-size: 0.9rem; letter-spacing: 1px;">PATIENT INFORMATION</h4>
+    <div style="border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 1.5rem; background-color: rgba(255,255,255,0.02); backdrop-filter: blur(10px); margin-bottom: 2rem;">
+        <h4 style="margin-top: 0; color: #94a3b8; font-size: 0.9rem; letter-spacing: 1px;">PATIENT INFORMATION</h4>
         <strong>Date of Birth:</strong> {dob}<br>
         <strong>Gender:</strong> {gender}<br>
         <strong>Clinical Records:</strong> {count}
@@ -437,13 +469,13 @@ def show_clinical_record():
         return
     st.markdown(f"<div class='breadcrumbs'>{patient['name']} / Clinical Record {record['id']}</div>", unsafe_allow_html=True)
     st.markdown(f"""
-    <div style="border-bottom: 2px solid #E5E7EB; padding-bottom: 1rem; margin-bottom: 2rem;">
+    <div style="border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 1rem; margin-bottom: 2rem;">
         <div style="display: flex; justify-content: space-between; align-items: flex-end;">
             <div>
-                <div style="font-weight: bold; font-size: 1.5rem; color: #111827;">RECORD CR-{record['id']:03d}</div>
-                <div style="color: #4B5563;">{patient['name']} · {record['record_type']}</div>
+                <div style="font-weight: 800; font-size: 1.5rem; color: #f8fafc; text-shadow: 0 0 15px rgba(56,189,248,0.3);">RECORD CR-{record['id']:03d}</div>
+                <div style="color: #94a3b8;">{patient['name']} · {record['record_type']}</div>
             </div>
-            <div style="font-weight: bold; color: #4B5563;">{record['record_date']}</div>
+            <div style="font-weight: 600; color: #cbd5e1;">{record['record_date']}</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
