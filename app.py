@@ -1,6 +1,12 @@
 import streamlit as st
 import os
 import time
+import sqlite3
+import json
+import datetime
+from pydantic import BaseModel, ValidationError, Field
+from typing import List
+from openai import OpenAI
 
 # Ensure API key is loaded from .env if running locally without export
 env_path = ".env"
@@ -10,153 +16,216 @@ if os.path.exists(env_path):
             if line.startswith('DEEPSEEK_API_KEY='):
                 os.environ["DEEPSEEK_API_KEY"] = line.strip().split('=', 1)[1]
 
-import database
-from extraction import extract_clinical_information
+# ====================================================================
+# EXTRACTION LOGIC
+# ====================================================================
 
-# Page configuration
-st.set_page_config(
-    page_title="CLINEX - Clinical Information Extraction System",
-    page_icon="⚕️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+class ClinicalInformation(BaseModel):
+    diagnoses: List[str] = Field(default_factory=list)
+    medication_changes: List[str] = Field(default_factory=list)
+    allergies: List[str] = Field(default_factory=list)
+    abnormal_findings: List[str] = Field(default_factory=list)
+    follow_up_instructions: List[str] = Field(default_factory=list)
 
-# Custom CSS for CLINEX system
+def get_deepseek_client():
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY environment variable is not set.")
+    
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://api.deepseek.com"
+    )
+
+def extract_clinical_information(clinical_note: str) -> dict:
+    client = get_deepseek_client()
+    
+    system_prompt = """
+    You are a strict clinical information extraction engine. 
+    Your job is to extract specific information from clinical notes and output it as a JSON object.
+    
+    EXTRACTION RULES:
+    1. Extract only information explicitly present in the clinical note. Do NOT infer, diagnose, predict, or add medical information.
+    2. Never hallucinate. If a category is not present, return an empty array [].
+    3. Preserve the meaning of the source. Do not rewrite information in a way that changes its meaning.
+    4. Extract ONLY these five categories: diagnoses, medication_changes, allergies, abnormal_findings, follow_up_instructions. Do not create additional categories.
+    5. Medication changes: Only include medication actions explicitly stated in the note (started, initiated, stopped, discontinued, increased, decreased, changed). Do not assume a change merely because a medication is mentioned.
+    6. Allergies: Only extract allergies explicitly stated or clearly documented in the note.
+    7. Abnormal findings: Extract explicitly documented abnormal clinical findings (vital signs, labs, exams). Do not classify something as abnormal based on your own knowledge unless the note explicitly indicates it.
+    8. Follow-up instructions: Only extract explicit instructions concerning follow-up, review, monitoring, referral, or return visits.
+    9. Empty categories: Return [] if no information exists. Never use null or "Not found".
+    
+    Respond ONLY with a raw, valid JSON object matching this schema. Do not include markdown formatting or explanation.
+    
+    {
+      "diagnoses": ["array of strings"],
+      "medication_changes": ["array of strings"],
+      "allergies": ["array of strings"],
+      "abnormal_findings": ["array of strings"],
+      "follow_up_instructions": ["array of strings"]
+    }
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Clinical Note:\n{clinical_note}"}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0
+        )
+        
+        raw_json_str = response.choices[0].message.content
+        parsed_data = json.loads(raw_json_str)
+        validated_data = ClinicalInformation(**parsed_data)
+        return validated_data.model_dump()
+        
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse JSON response from API: {e}")
+    except ValidationError as e:
+        raise RuntimeError(f"API response failed schema validation: {e}")
+    except Exception as e:
+        raise RuntimeError(f"An error occurred during extraction: {e}")
+
+# ====================================================================
+# DATABASE LOGIC
+# ====================================================================
+
+DB_PATH = "clinical_extraction.db"
+
+def get_connection():
+    return sqlite3.connect(DB_PATH)
+
+def initialize_database():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Patients (id INTEGER PRIMARY KEY AUTOINCREMENT, patient_code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, date_of_birth TEXT NOT NULL, gender TEXT NOT NULL)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ClinicalRecords (id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id INTEGER NOT NULL, record_date TEXT NOT NULL, record_type TEXT NOT NULL, clinical_note TEXT NOT NULL, FOREIGN KEY (patient_id) REFERENCES Patients(id))''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ExtractionResults (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, diagnoses TEXT NOT NULL, medication_changes TEXT NOT NULL, allergies TEXT NOT NULL, abnormal_findings TEXT NOT NULL, follow_up_instructions TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY (record_id) REFERENCES ClinicalRecords(id))''')
+    conn.commit()
+    conn.close()
+
+def create_patient(patient_code, name, date_of_birth, gender):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''INSERT INTO Patients (patient_code, name, date_of_birth, gender) VALUES (?, ?, ?, ?)''', (patient_code, name, date_of_birth, gender))
+    conn.commit()
+    patient_id = cursor.lastrowid
+    conn.close()
+    return patient_id
+
+def get_patients():
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM Patients")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_patient(patient_id):
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM Patients WHERE id = ?", (patient_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def create_clinical_record(patient_id, record_date, record_type, clinical_note):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''INSERT INTO ClinicalRecords (patient_id, record_date, record_type, clinical_note) VALUES (?, ?, ?, ?)''', (patient_id, record_date, record_type, clinical_note))
+    conn.commit()
+    record_id = cursor.lastrowid
+    conn.close()
+    return record_id
+
+def get_patient_records(patient_id):
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ClinicalRecords WHERE patient_id = ?", (patient_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_clinical_record(record_id):
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ClinicalRecords WHERE id = ?", (record_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def save_extraction_result(record_id, result_dict):
+    conn = get_connection()
+    cursor = conn.cursor()
+    diagnoses = json.dumps(result_dict.get("diagnoses", []))
+    medication_changes = json.dumps(result_dict.get("medication_changes", []))
+    allergies = json.dumps(result_dict.get("allergies", []))
+    abnormal_findings = json.dumps(result_dict.get("abnormal_findings", []))
+    follow_up_instructions = json.dumps(result_dict.get("follow_up_instructions", []))
+    created_at = datetime.datetime.now().isoformat()
+    cursor.execute('''INSERT INTO ExtractionResults (record_id, diagnoses, medication_changes, allergies, abnormal_findings, follow_up_instructions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)''', (record_id, diagnoses, medication_changes, allergies, abnormal_findings, follow_up_instructions, created_at))
+    conn.commit()
+    extraction_id = cursor.lastrowid
+    conn.close()
+    return extraction_id
+
+def get_extraction_result(record_id):
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ExtractionResults WHERE record_id = ? ORDER BY created_at DESC LIMIT 1", (record_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    result = dict(row)
+    result["diagnoses"] = json.loads(result["diagnoses"])
+    result["medication_changes"] = json.loads(result["medication_changes"])
+    result["allergies"] = json.loads(result["allergies"])
+    result["abnormal_findings"] = json.loads(result["abnormal_findings"])
+    result["follow_up_instructions"] = json.loads(result["follow_up_instructions"])
+    return result
+
+# ====================================================================
+# STREAMLIT UI
+# ====================================================================
+
+st.set_page_config(page_title="CLINEX - Clinical Information Extraction System", page_icon="⚕️", layout="wide", initial_sidebar_state="expanded")
+
 st.markdown("""
 <style>
-    /* Hide Streamlit elements */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    
-    /* Global Typography */
-    body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-    
-    /* Branding */
-    .brand-title {
-        font-weight: 800;
-        font-size: 1.8rem;
-        color: #1E3A8A;
-        letter-spacing: 1px;
-        margin-bottom: -10px;
-    }
-    .brand-subtitle {
-        font-size: 0.9rem;
-        color: #6B7280;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        margin-bottom: 30px;
-    }
-    
-    /* Status indicators */
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    .brand-title { font-weight: 800; font-size: 1.8rem; color: #1E3A8A; letter-spacing: 1px; margin-bottom: -10px; }
+    .brand-subtitle { font-size: 0.9rem; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 30px; }
     .status-online { color: #10B981; font-weight: bold; }
     .status-pending { color: #F59E0B; font-weight: bold; }
     .status-completed { color: #3B82F6; font-weight: bold; }
-    
-    /* Cards and Containers */
-    .metric-card {
-        background-color: #ffffff;
-        border: 1px solid #E5E7EB;
-        border-radius: 6px;
-        padding: 1.5rem;
-        text-align: center;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-    }
-    .metric-value {
-        font-size: 2.5rem;
-        font-weight: 700;
-        color: #111827;
-    }
-    .metric-label {
-        font-size: 0.75rem;
-        font-weight: 600;
-        color: #6B7280;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    
-    .data-card {
-        background-color: #ffffff;
-        border: 1px solid #E5E7EB;
-        border-radius: 6px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        transition: box-shadow 0.2s;
-    }
-    .data-card:hover {
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-        border-color: #D1D5DB;
-    }
-    
-    /* Results Interface */
-    .result-section {
-        background-color: #ffffff;
-        border: 1px solid #E5E7EB;
-        border-left: 4px solid #1E3A8A;
-        border-radius: 4px;
-        padding: 1.2rem;
-        margin-bottom: 1.2rem;
-    }
-    .result-header {
-        font-size: 0.75rem;
-        font-weight: 700;
-        color: #6B7280;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-bottom: 0.5rem;
-    }
-    .result-content {
-        font-size: 1rem;
-        color: #111827;
-        font-weight: 500;
-    }
-    .empty-result {
-        color: #9CA3AF;
-        font-style: italic;
-        font-size: 0.9rem;
-    }
-    
-    /* Workstation */
-    .workstation-note {
-        background-color: #F9FAFB;
-        border: 1px solid #E5E7EB;
-        border-radius: 6px;
-        padding: 1.5rem;
-        font-family: monospace;
-        font-size: 0.95rem;
-        line-height: 1.6;
-        color: #374151;
-        white-space: pre-wrap;
-    }
-    
-    /* Breadcrumbs & Metadata */
-    .breadcrumbs {
-        font-size: 0.85rem;
-        color: #6B7280;
-        margin-bottom: 1.5rem;
-    }
-    .metadata-block {
-        background-color: #F3F4F6;
-        border-radius: 4px;
-        padding: 1rem;
-        margin-top: 2rem;
-        font-size: 0.85rem;
-        color: #4B5563;
-    }
-    
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background-color: #F9FAFB;
-        border-right: 1px solid #E5E7EB;
-    }
+    .metric-card { background-color: #ffffff; border: 1px solid #E5E7EB; border-radius: 6px; padding: 1.5rem; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+    .metric-value { font-size: 2.5rem; font-weight: 700; color: #111827; }
+    .metric-label { font-size: 0.75rem; font-weight: 600; color: #6B7280; text-transform: uppercase; letter-spacing: 1px; }
+    .data-card { background-color: #ffffff; border: 1px solid #E5E7EB; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; transition: box-shadow 0.2s; }
+    .data-card:hover { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); border-color: #D1D5DB; }
+    .result-section { background-color: #ffffff; border: 1px solid #E5E7EB; border-left: 4px solid #1E3A8A; border-radius: 4px; padding: 1.2rem; margin-bottom: 1.2rem; }
+    .result-header { font-size: 0.75rem; font-weight: 700; color: #6B7280; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 0.5rem; }
+    .result-content { font-size: 1rem; color: #111827; font-weight: 500; }
+    .empty-result { color: #9CA3AF; font-style: italic; font-size: 0.9rem; }
+    .workstation-note { background-color: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 6px; padding: 1.5rem; font-family: monospace; font-size: 0.95rem; line-height: 1.6; color: #374151; white-space: pre-wrap; }
+    .breadcrumbs { font-size: 0.85rem; color: #6B7280; margin-bottom: 1.5rem; }
+    .metadata-block { background-color: #F3F4F6; border-radius: 4px; padding: 1rem; margin-top: 2rem; font-size: 0.85rem; color: #4B5563; }
+    [data-testid="stSidebar"] { background-color: #F9FAFB; border-right: 1px solid #E5E7EB; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# STATE MANAGEMENT
-# ---------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "current_view" not in st.session_state:
@@ -172,13 +241,9 @@ def navigate(view):
     st.session_state["current_view"] = view
     st.rerun()
 
-# ---------------------------------------------------------
-# SCREEN 1 - LOGIN
-# ---------------------------------------------------------
 def show_login():
     st.markdown("<br><br><br>", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([1, 1.2, 1])
-    
     with col2:
         st.markdown("""
         <div style="text-align: center; margin-bottom: 2rem;">
@@ -187,21 +252,15 @@ def show_login():
             <div style="color: #6B7280; font-size: 0.9rem;">Structured information from clinical records</div>
         </div>
         """, unsafe_allow_html=True)
-        
         with st.container(border=True):
             st.text_input("Email", placeholder="doctor@hospital.com")
             st.text_input("Password", type="password", placeholder="••••••••")
-            
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("SIGN IN", type="primary", use_container_width=True):
                 st.session_state["logged_in"] = True
                 navigate("overview")
-                
         st.markdown("<div style='text-align: center; color: #9CA3AF; font-size: 0.8rem; margin-top: 1rem;'>Prototype Environment</div>", unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# APP SHELL & SIDEBAR
-# ---------------------------------------------------------
 def render_sidebar():
     st.sidebar.markdown("""
     <div style="margin-bottom: 2rem;">
@@ -209,13 +268,11 @@ def render_sidebar():
         <div style="font-size: 0.75rem; color: #6B7280;">● System Online &nbsp;&nbsp;|&nbsp;&nbsp; User ▼</div>
     </div>
     """, unsafe_allow_html=True)
-    
     if st.sidebar.button("▣ Overview", use_container_width=True, type="primary" if st.session_state["current_view"] == "overview" else "secondary"):
         navigate("overview")
     if st.sidebar.button("▣ Patients", use_container_width=True, type="primary" if st.session_state["current_view"] in ["patients", "workspace"] else "secondary"):
         navigate("patients")
     if st.sidebar.button("▣ Records", use_container_width=True, type="primary" if st.session_state["current_view"] in ["record", "results"] else "secondary"):
-        # Default to patients if no record selected
         if st.session_state["selected_record_id"]:
             navigate("record")
         elif st.session_state["selected_patient_id"]:
@@ -224,12 +281,10 @@ def render_sidebar():
             navigate("patients")
     if st.sidebar.button("▣ Extractions", use_container_width=True, type="primary" if st.session_state["current_view"] == "extractions" else "secondary"):
         navigate("extractions")
-        
     st.sidebar.markdown("<br><hr><br>", unsafe_allow_html=True)
     st.sidebar.markdown("<div style='font-size: 0.75rem; font-weight: bold; color: #9CA3AF; margin-bottom: 0.5rem;'>SYSTEM</div>", unsafe_allow_html=True)
     st.sidebar.button("⚙ Settings", use_container_width=True)
     st.sidebar.button("ℹ About", use_container_width=True)
-    
     st.sidebar.markdown("<br><br>", unsafe_allow_html=True)
     st.sidebar.markdown("""
     <div style="font-size: 0.75rem; color: #6B7280;">
@@ -239,19 +294,13 @@ def render_sidebar():
     </div>
     """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# SCREEN 2 - OVERVIEW DASHBOARD
-# ---------------------------------------------------------
 def show_overview():
     st.markdown("<div class='brand-subtitle'>OVERVIEW</div>", unsafe_allow_html=True)
     st.markdown("## Clinical Information Extraction System")
-    
     try:
-        patients = database.get_patients()
+        patients = get_patients()
         num_patients = len(patients)
-        
-        # Calculate totals
-        conn = database.get_connection()
+        conn = get_connection()
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM ClinicalRecords")
         num_records = c.fetchone()[0]
@@ -261,8 +310,6 @@ def show_overview():
     except Exception:
         st.error("Unable to connect to the clinical records database.")
         return
-
-    # Metrics Layout
     col1, col2, col3, col4 = st.columns(4)
     def metric_card(col, value, label):
         col.markdown(f"""
@@ -271,17 +318,14 @@ def show_overview():
             <div class="metric-label">{label}</div>
         </div>
         """, unsafe_allow_html=True)
-        
     metric_card(col1, num_patients, "PATIENTS")
     metric_card(col2, num_records, "RECORDS")
     metric_card(col3, num_extractions, "EXTRACTIONS")
     metric_card(col4, num_extractions, "SAVED")
-    
     st.markdown("<br><br>", unsafe_allow_html=True)
     st.markdown("### RECENT ACTIVITY")
-    
     try:
-        conn = database.get_connection()
+        conn = get_connection()
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         c.execute("""
@@ -293,12 +337,10 @@ def show_overview():
         """)
         activities = c.fetchall()
         conn.close()
-        
         if not activities:
             st.info("No recent extraction activity.")
         else:
             for act in activities:
-                # Mock time ago for prototype presentation
                 st.markdown(f"""
                 <div style="border-left: 2px solid #D1D5DB; padding-left: 1rem; margin-bottom: 1rem;">
                     <strong>Extraction completed</strong><br>
@@ -309,35 +351,25 @@ def show_overview():
     except Exception:
         pass
 
-# ---------------------------------------------------------
-# SCREEN 3 - PATIENTS MODULE
-# ---------------------------------------------------------
 def show_patients():
     st.markdown("<div class='brand-subtitle'>PATIENTS</div>", unsafe_allow_html=True)
     st.markdown("## Manage and review registered patient records.")
-    
     st.text_input("Search patients...", placeholder="Enter name or ID...")
-    
     try:
-        patients = database.get_patients()
+        patients = get_patients()
     except Exception:
         st.error("Unable to connect to the clinical records database.")
         return
-        
     if not patients:
         st.info("No patients found.")
         return
-        
     st.markdown("<hr>", unsafe_allow_html=True)
-    
-    # Header row
     col1, col2, col3, col4 = st.columns([1, 2, 1, 1])
     col1.markdown("**PATIENT ID**")
     col2.markdown("**PATIENT NAME**")
     col3.markdown("**GENDER**")
     col4.markdown("**ACTION**")
     st.markdown("<hr style='margin-top: 0;'>", unsafe_allow_html=True)
-    
     for p in patients:
         col1, col2, col3, col4 = st.columns([1, 2, 1, 1])
         col1.write(p['patient_code'])
@@ -348,30 +380,21 @@ def show_patients():
                 st.session_state["selected_patient_id"] = p['id']
                 navigate("workspace")
 
-# ---------------------------------------------------------
-# SCREEN 4 - PATIENT WORKSPACE
-# ---------------------------------------------------------
-import sqlite3
-
 def show_workspace():
     p_id = st.session_state.get("selected_patient_id")
     if not p_id:
         navigate("patients")
-        
     try:
-        patient = database.get_patient(p_id)
-        records = database.get_patient_records(p_id)
+        patient = get_patient(p_id)
+        records = get_patient_records(p_id)
     except Exception:
         st.error("Unable to connect to the clinical records database.")
         return
-        
     st.markdown(f"<div class='breadcrumbs'>Patients / {patient['name']}</div>", unsafe_allow_html=True)
     st.markdown("<div class='brand-subtitle'>PATIENT WORKSPACE</div>", unsafe_allow_html=True)
     st.markdown(f"## {patient['name']}")
     st.markdown(f"#### {patient['patient_code']}")
-    
     st.markdown("<br>", unsafe_allow_html=True)
-    
     st.markdown("""
     <div style="border: 1px solid #E5E7EB; border-radius: 6px; padding: 1.5rem; background-color: #F9FAFB; margin-bottom: 2rem;">
         <h4 style="margin-top: 0; color: #4B5563; font-size: 0.9rem; letter-spacing: 1px;">PATIENT INFORMATION</h4>
@@ -380,14 +403,10 @@ def show_workspace():
         <strong>Clinical Records:</strong> {count}
     </div>
     """.format(dob=patient['date_of_birth'], gender=patient['gender'], count=len(records)), unsafe_allow_html=True)
-    
     st.markdown("### CLINICAL RECORDS")
-    
     if not records:
         st.info("No clinical records available for this patient.")
         return
-        
-    # Display cards
     for record in records:
         with st.container():
             st.markdown(f"""
@@ -401,29 +420,22 @@ def show_workspace():
                 st.session_state["selected_record_id"] = record['id']
                 navigate("record")
 
-# ---------------------------------------------------------
-# SCREEN 5 - CLINICAL RECORD MODULE
-# ---------------------------------------------------------
 def show_clinical_record():
     r_id = st.session_state.get("selected_record_id")
     p_id = st.session_state.get("selected_patient_id")
     if not r_id:
         navigate("patients")
-        
     try:
-        record = database.get_clinical_record(r_id)
+        record = get_clinical_record(r_id)
         if not record:
             st.error("The selected clinical record could not be found.")
             return
-        patient = database.get_patient(record['patient_id'])
-        existing_extraction = database.get_extraction_result(r_id)
+        patient = get_patient(record['patient_id'])
+        existing_extraction = get_extraction_result(r_id)
     except Exception:
         st.error("Unable to connect to the clinical records database.")
         return
-
     st.markdown(f"<div class='breadcrumbs'>{patient['name']} / Clinical Record {record['id']}</div>", unsafe_allow_html=True)
-    
-    # Header
     st.markdown(f"""
     <div style="border-bottom: 2px solid #E5E7EB; padding-bottom: 1rem; margin-bottom: 2rem;">
         <div style="display: flex; justify-content: space-between; align-items: flex-end;">
@@ -435,35 +447,25 @@ def show_clinical_record():
         </div>
     </div>
     """, unsafe_allow_html=True)
-    
     col_doc, col_ext = st.columns([1.5, 1])
-    
     with col_doc:
         st.markdown("<div style='font-weight: bold; margin-bottom: 1rem; color: #374151;'>CLINICAL DOCUMENTATION</div>", unsafe_allow_html=True)
         st.markdown(f"<div style='color: #6B7280; margin-bottom: 0.5rem; font-size: 0.9rem;'>{record['record_type']} Note</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='workstation-note'>{record['clinical_note']}</div>", unsafe_allow_html=True)
-        
     with col_ext:
         st.markdown("<div style='font-weight: bold; margin-bottom: 1rem; color: #374151;'>EXTRACTION</div>", unsafe_allow_html=True)
-        
         with st.container(border=True):
             st.markdown("<div style='font-size: 0.8rem; font-weight: bold; color: #6B7280; margin-bottom: 0.5rem;'>Status</div>", unsafe_allow_html=True)
-            
-            # Simulated Processing State
             if st.session_state.get("extracting_record_id") == r_id:
                 st.markdown("**PROCESSING CLINICAL RECORD**")
-                
-                # Simple pipeline visualization
                 ph1 = st.empty()
                 ph2 = st.empty()
                 ph3 = st.empty()
                 ph4 = st.empty()
                 ph5 = st.empty()
-                
                 ph1.markdown("✓ Retrieve clinical documentation")
                 time.sleep(0.5)
                 ph2.markdown("● Extract critical information")
-                
                 try:
                     result = extract_clinical_information(record['clinical_note'])
                     ph2.markdown("✓ Extract critical information")
@@ -471,7 +473,7 @@ def show_clinical_record():
                     time.sleep(0.3)
                     ph3.markdown("✓ Validate structured result")
                     ph4.markdown("● Save extraction")
-                    database.save_extraction_result(r_id, result)
+                    save_extraction_result(r_id, result)
                     ph4.markdown("✓ Save extraction")
                     ph5.markdown("**EXTRACTION COMPLETE ✓**")
                     time.sleep(0.5)
@@ -486,7 +488,6 @@ def show_clinical_record():
                 except Exception:
                     st.session_state["extracting_record_id"] = None
                     st.error("Unable to extract information from this clinical record. Please try again.")
-                
             else:
                 if existing_extraction:
                     st.markdown("<div class='status-completed'>✓ Extraction completed</div><br>", unsafe_allow_html=True)
@@ -502,38 +503,29 @@ def show_clinical_record():
                         st.session_state["extracting_record_id"] = r_id
                         st.rerun()
 
-# ---------------------------------------------------------
-# SCREEN 6 - RESULTS INTERFACE
-# ---------------------------------------------------------
 def show_results():
     r_id = st.session_state.get("selected_record_id")
     p_id = st.session_state.get("selected_patient_id")
     if not r_id:
         navigate("patients")
-        
     try:
-        record = database.get_clinical_record(r_id)
-        patient = database.get_patient(record['patient_id'])
-        result = database.get_extraction_result(r_id)
+        record = get_clinical_record(r_id)
+        patient = get_patient(record['patient_id'])
+        result = get_extraction_result(r_id)
     except Exception:
         st.error("Unable to connect to the clinical records database.")
         return
-        
     if not result:
         st.warning("No extraction result found.")
         return
-        
     st.markdown(f"<div class='breadcrumbs'>{patient['name']} / Clinical Record CR-{record['id']:03d} / Extraction Result</div>", unsafe_allow_html=True)
-    
     st.markdown("<div class='brand-subtitle'>EXTRACTION RESULT</div>", unsafe_allow_html=True)
     st.markdown(f"## CR-{record['id']:03d}")
     st.markdown(f"#### {patient['name']}")
     st.markdown(f"##### {record['record_date']}")
     st.markdown("<div class='status-completed' style='margin-bottom: 2rem;'>✓ Extraction completed</div>", unsafe_allow_html=True)
-    
     st.markdown("### CRITICAL INFORMATION")
     st.markdown("<hr style='margin-top:0;'>", unsafe_allow_html=True)
-    
     def render_cat(title, items):
         st.markdown(f"<div class='result-header'>{title}</div>", unsafe_allow_html=True)
         if not items:
@@ -541,7 +533,6 @@ def show_results():
         else:
             content = "<br>".join([f"• {item}" for item in items])
             st.markdown(f"<div class='result-section result-content'>{content}</div>", unsafe_allow_html=True)
-            
     col1, col2 = st.columns(2)
     with col1:
         render_cat("DIAGNOSES", result.get("diagnoses", []))
@@ -550,8 +541,6 @@ def show_results():
     with col2:
         render_cat("MEDICATION CHANGES", result.get("medication_changes", []))
         render_cat("ABNORMAL FINDINGS", result.get("abnormal_findings", []))
-        
-    # Metadata and Source Traceability
     st.markdown(f"""
     <div class="metadata-block">
         <strong style="color: #111827;">EXTRACTION DETAILS</strong><br>
@@ -564,20 +553,15 @@ def show_results():
         Date: {record['record_date']}
     </div>
     """, unsafe_allow_html=True)
-    
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("View Original Clinical Note"):
         navigate("record")
 
-# ---------------------------------------------------------
-# SCREEN 7 - EXTRACTIONS MODULE
-# ---------------------------------------------------------
 def show_extractions():
     st.markdown("<div class='brand-subtitle'>EXTRACTIONS</div>", unsafe_allow_html=True)
     st.markdown("## System Extraction Log")
-    
     try:
-        conn = database.get_connection()
+        conn = get_connection()
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         c.execute("""
@@ -592,13 +576,10 @@ def show_extractions():
     except Exception:
         st.error("Unable to connect to the database.")
         return
-        
     if not exts:
         st.info("No extractions found.")
         return
-        
     st.markdown("<hr>", unsafe_allow_html=True)
-    
     col1, col2, col3, col4, col5 = st.columns([1, 2, 1, 1, 1.5])
     col1.markdown("**EXTRACTION ID**")
     col2.markdown("**PATIENT**")
@@ -606,7 +587,6 @@ def show_extractions():
     col4.markdown("**DATE**")
     col5.markdown("**STATUS**")
     st.markdown("<hr style='margin-top: 0;'>", unsafe_allow_html=True)
-    
     for ex in exts:
         c1, c2, c3, c4, c5 = st.columns([1, 2, 1, 1, 1.5])
         c1.write(f"EXT-{ex['ext_id']:03d}")
@@ -616,12 +596,9 @@ def show_extractions():
         with c5:
             if st.button("View Result", key=f"vr_{ex['ext_id']}"):
                 st.session_state["selected_record_id"] = ex['rec_id']
-                st.session_state["selected_patient_id"] = database.get_clinical_record(ex['rec_id'])['patient_id']
+                st.session_state["selected_patient_id"] = get_clinical_record(ex['rec_id'])['patient_id']
                 navigate("results")
 
-# ---------------------------------------------------------
-# MAIN ROUTING
-# ---------------------------------------------------------
 if not st.session_state["logged_in"]:
     show_login()
 else:
